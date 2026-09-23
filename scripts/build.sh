@@ -4,7 +4,8 @@
 ## Created by Stasel
 ## BSD-3 License
 ## 
-## Example usage (from the repository root): BRANCH=branch-heads/7727 MACOS=true IOS=true sh scripts/build.sh
+## Example usage (from the repository root):
+## BRANCH=branch-heads/7727 MACOS=true IOS=true VISIONOS=true sh scripts/build.sh
 
 # Configs
 DEBUG="${DEBUG:-false}"
@@ -12,11 +13,12 @@ BRANCH="${BRANCH:-main}"
 IOS="${IOS:-false}"
 MACOS="${MACOS:-false}"
 MAC_CATALYST="${MAC_CATALYST:-false}"
+VISIONOS="${VISIONOS:-false}"
 
 ROOT_DIR="$(pwd)"
 OUTPUT_DIR="${ROOT_DIR}/out"
 XCFRAMEWORK_DIR="${OUTPUT_DIR}/WebRTC.xcframework"
-COMMON_GN_ARGS="is_debug=${DEBUG} rtc_libvpx_build_vp9=true is_component_build=false rtc_include_tests=false rtc_enable_objc_symbol_export=true enable_stripping=true enable_dsyms=true use_lld=true rtc_ios_use_opengl_rendering=true rtc_system_openh264=true rtc_use_h265=true"
+COMMON_GN_ARGS="is_debug=${DEBUG} rtc_libvpx_build_vp9=true is_component_build=false rtc_include_tests=false rtc_build_examples=false rtc_build_tools=false rtc_enable_objc_symbol_export=true enable_stripping=true enable_dsyms=true use_lld=true rtc_system_openh264=true rtc_use_h265=true"
 PLISTBUDDY_EXEC="/usr/libexec/PlistBuddy"
 
 
@@ -24,7 +26,7 @@ build_iOS() {
     local arch=$1
     local environment=$2
     local gen_dir="${OUTPUT_DIR}/ios-${arch}-${environment}"
-    local gen_args="${COMMON_GN_ARGS} target_cpu=\"${arch}\" target_os=\"ios\" target_environment=\"${environment}\" ios_deployment_target=\"12.0\" ios_enable_code_signing=false"
+    local gen_args="${COMMON_GN_ARGS} target_cpu=\"${arch}\" target_os=\"ios\" target_environment=\"${environment}\" ios_deployment_target=\"12.0\" ios_enable_code_signing=false rtc_ios_use_opengl_rendering=true"
     gn gen "${gen_dir}" --args="${gen_args}"
     gn args --list ${gen_dir} > ${gen_dir}/gn-args.txt
     ninja -C "${gen_dir}" framework_objc || exit 1
@@ -45,7 +47,31 @@ build_macOS() {
 build_catalyst() {
     local arch=$1
     local gen_dir="${OUTPUT_DIR}/catalyst-${arch}"
-    local gen_args="${COMMON_GN_ARGS} target_cpu=\"${arch}\" target_environment=\"catalyst\" target_os=\"ios\" ios_deployment_target=\"14.0\" ios_enable_code_signing=false use_lld=false"
+    local gen_args="${COMMON_GN_ARGS} target_cpu=\"${arch}\" target_environment=\"catalyst\" target_os=\"ios\" ios_deployment_target=\"14.0\" ios_enable_code_signing=false use_lld=false rtc_ios_use_opengl_rendering=true"
+    gn gen "${gen_dir}" --args="${gen_args}"
+    gn args --list ${gen_dir} > ${gen_dir}/gn-args.txt
+    ninja -C "${gen_dir}" framework_objc || exit 1
+}
+
+build_visionOS() {
+    local environment=$1
+    local gen_dir
+
+    if [ "${environment}" = "simulator" ]; then
+        gen_dir="${OUTPUT_DIR}/visionos-arm64-simulator"
+    else
+        gen_dir="${OUTPUT_DIR}/visionos-arm64-device"
+    fi
+
+    local gen_args="${COMMON_GN_ARGS}"
+    gen_args="${gen_args} target_cpu=\"arm64\" target_os=\"ios\""
+    gen_args="${gen_args} target_environment=\"${environment}\""
+    gen_args="${gen_args} target_platform=\"xros\" xros=true"
+    gen_args="${gen_args} ios_deployment_target=\"2.0\""
+    gen_args="${gen_args} ios_enable_code_signing=false"
+    gen_args="${gen_args} rtc_ios_use_opengl_rendering=false"
+    gen_args="${gen_args} use_custom_libcxx=false"
+    gen_args="${gen_args} clang_use_chrome_plugins=false use_lld=false"
     gn gen "${gen_dir}" --args="${gen_args}"
     gn args --list ${gen_dir} > ${gen_dir}/gn-args.txt
     ninja -C "${gen_dir}" framework_objc || exit 1
@@ -79,6 +105,391 @@ fix_privacy_manifest() {
         mv "${nested}/A/Resources/PrivacyInfo.xcprivacy" "${framework}/Versions/A/Resources/" || exit 1
         rm -rf "${nested}"
     fi
+}
+
+fix_visionos_framework_plist() {
+    local framework=$1
+    local platform=$2
+    local sdk_name=$3
+    local info_plist="${framework}/Info.plist"
+
+    if [ ! -f "${info_plist}" ]; then
+        info_plist="${framework}/Versions/A/Resources/Info.plist"
+    fi
+
+    if [ ! -f "${info_plist}" ]; then
+        return
+    fi
+
+    "$PLISTBUDDY_EXEC" \
+        -c "Delete :CFBundleSupportedPlatforms" \
+        "${info_plist}" 2>/dev/null
+    "$PLISTBUDDY_EXEC" -c "Add :CFBundleSupportedPlatforms array" "${info_plist}"
+    "$PLISTBUDDY_EXEC" -c "Add :CFBundleSupportedPlatforms: string ${platform}" "${info_plist}"
+    "$PLISTBUDDY_EXEC" \
+        -c "Set :DTPlatformName ${sdk_name}" \
+        "${info_plist}" 2>/dev/null
+    local sdk_version="$(xcrun --sdk "${sdk_name}" --show-sdk-version)"
+    "$PLISTBUDDY_EXEC" \
+        -c "Set :DTSDKName ${sdk_name}${sdk_version}" \
+        "${info_plist}" 2>/dev/null
+    "$PLISTBUDDY_EXEC" \
+        -c "Set :MinimumOSVersion 2.0" \
+        "${info_plist}" 2>/dev/null
+    "$PLISTBUDDY_EXEC" \
+        -c "Delete :UIDeviceFamily" \
+        "${info_plist}" 2>/dev/null
+    "$PLISTBUDDY_EXEC" -c "Add :UIDeviceFamily array" "${info_plist}"
+    "$PLISTBUDDY_EXEC" -c "Add :UIDeviceFamily: integer 7" "${info_plist}"
+}
+
+patch_visionos_build_config() {
+    [ "$VISIONOS" = true ] || return 0
+
+    python3 - <<'PY'
+from pathlib import Path
+
+def replace(path, old, new, count=-1):
+    file_path = Path(path)
+    text = file_path.read_text()
+    if old not in text:
+        raise SystemExit(f"pattern not found in {path}")
+    file_path.write_text(text.replace(old, new, count))
+
+replace(
+    "src/build/config/apple/mobile_config.gni",
+    '  # Valid values: "iphoneos" (default), "tvos", "watchos".\n',
+    '  # Valid values: "iphoneos" (default), "tvos", "watchos", "xros".\n',
+)
+replace(
+    "src/build/config/apple/mobile_config.gni",
+    '      "tvos",\n    ]\n',
+    '      "tvos",\n      "xros",\n    ]\n',
+)
+replace(
+    "src/build/config/apple/sdk_info.py",
+    '''            'macosx',
+            'watchos',
+            'watchsimulator',
+''',
+    '''            'macosx',
+            'watchos',
+            'watchsimulator',
+            'xros',
+            'xrsimulator',
+''',
+)
+replace(
+    "src/build/config/apple/codesign.py",
+    '''        if platform in ('iphoneos', 'iphonesimulator'):
+            return 'ios'
+''',
+    '''        if platform in (
+                'iphoneos', 'iphonesimulator', 'xros', 'xrsimulator'):
+            return 'ios'
+''',
+)
+replace(
+    "src/build/config/ios/ios_sdk.gni",
+    '''  } else if (target_platform == "tvos") {
+    if (target_environment == "simulator") {
+      ios_sdk_name = "appletvsimulator"
+      ios_sdk_platform = "AppleTVSimulator"
+    } else if (target_environment == "device") {
+      ios_sdk_name = "appletvos"
+      ios_sdk_platform = "AppleTVOS"
+    } else {
+      assert(false, "unsupported target_environment=$target_environment")
+    }
+  } else {
+''',
+    '''  } else if (target_platform == "tvos") {
+    if (target_environment == "simulator") {
+      ios_sdk_name = "appletvsimulator"
+      ios_sdk_platform = "AppleTVSimulator"
+    } else if (target_environment == "device") {
+      ios_sdk_name = "appletvos"
+      ios_sdk_platform = "AppleTVOS"
+    } else {
+      assert(false, "unsupported target_environment=$target_environment")
+    }
+  } else if (target_platform == "xros") {
+    if (target_environment == "simulator") {
+      ios_sdk_name = "xrsimulator"
+      ios_sdk_platform = "XRSimulator"
+    } else if (target_environment == "device") {
+      ios_sdk_name = "xros"
+      ios_sdk_platform = "XROS"
+    } else {
+      assert(false, "unsupported target_environment=$target_environment")
+    }
+  } else {
+''',
+)
+replace(
+    "src/build/config/ios/BUILD.gn",
+    '''  if (target_platform == "iphoneos") {
+    triplet_os = "apple-ios"
+  } else if (target_platform == "tvos") {
+    triplet_os = "apple-tvos"
+  }
+''',
+    '''  if (target_platform == "iphoneos") {
+    triplet_os = "apple-ios"
+  } else if (target_platform == "tvos") {
+    triplet_os = "apple-tvos"
+  } else if (target_platform == "xros") {
+    triplet_os = "apple-xros"
+  }
+''',
+)
+replace(
+    "src/build/config/ios/rules.gni",
+    '''    if (target_platform == "iphoneos") {
+      _build_info_plist = "//build/config/ios/BuildInfo.plist"
+    } else if (target_platform == "tvos") {
+      _build_info_plist = "//build/config/tvos/BuildInfo.plist"
+    }
+''',
+    '''    if (target_platform == "iphoneos") {
+      _build_info_plist = "//build/config/ios/BuildInfo.plist"
+    } else if (target_platform == "tvos") {
+      _build_info_plist = "//build/config/tvos/BuildInfo.plist"
+    } else if (target_platform == "xros") {
+      _build_info_plist = "//build/config/ios/BuildInfo.plist"
+    }
+''',
+)
+replace(
+    "src/sdk/BUILD.gn",
+    '''      if (target_platform != "tvos") {
+        sources += [
+          "objc/helpers/RTCCameraPreviewView.h",
+          "objc/helpers/RTCCameraPreviewView.m",
+        ]
+      }
+''',
+    '''      if (target_platform != "tvos" && target_platform != "xros") {
+        sources += [
+          "objc/helpers/RTCCameraPreviewView.h",
+          "objc/helpers/RTCCameraPreviewView.m",
+        ]
+      }
+''',
+)
+replace(
+    "src/sdk/BUILD.gn",
+    '''      if (is_ios) {
+        sources += [
+          "objc/components/renderer/metal/RTCMTLVideoView.h",
+          "objc/components/renderer/metal/RTCMTLVideoView.m",
+        ]
+        frameworks += [ "UIKit.framework" ]
+      }
+''',
+    '''      if (is_ios && target_platform != "xros") {
+        sources += [
+          "objc/components/renderer/metal/RTCMTLVideoView.h",
+          "objc/components/renderer/metal/RTCMTLVideoView.m",
+        ]
+        frameworks += [ "UIKit.framework" ]
+      }
+''',
+)
+replace(
+    "src/sdk/BUILD.gn",
+    '''          "objc/components/capturer/RTCCameraVideoCapturer.h",
+          "objc/components/capturer/RTCFileVideoCapturer.h",
+          "objc/components/network/RTCNetworkMonitor.h",
+          "objc/components/renderer/metal/RTCMTLVideoView.h",
+          "objc/components/renderer/opengl/RTCEAGLVideoView.h",
+          "objc/components/renderer/opengl/RTCVideoViewShading.h",
+''',
+    '''          "objc/components/network/RTCNetworkMonitor.h",
+''',
+)
+replace(
+    "src/sdk/BUILD.gn",
+    '''          "objc/components/video_frame_buffer/RTCCVPixelBuffer.h",
+          "objc/helpers/RTCCameraPreviewView.h",
+          "objc/helpers/RTCDispatcher.h",
+''',
+    '''          "objc/components/video_frame_buffer/RTCCVPixelBuffer.h",
+          "objc/helpers/RTCDispatcher.h",
+''',
+)
+replace(
+    "src/sdk/BUILD.gn",
+    '''          ":metal_objc",
+          ":native_api",
+          ":native_video",
+          ":peerconnectionfactory_base_objc",
+          ":videocapture_objc",
+          ":videocodec_objc",
+''',
+    '''          ":native_api",
+          ":native_video",
+          ":peerconnectionfactory_base_objc",
+          ":videocodec_objc",
+''',
+    1,
+)
+replace(
+    "src/sdk/BUILD.gn",
+    '''        if (!build_with_chromium) {
+          common_objc_headers += [
+            "objc/api/logging/RTCCallbackLogger.h",
+            "objc/api/peerconnection/RTCFileLogger.h",
+          ]
+        }
+''',
+    '''        if (target_platform != "xros") {
+          common_objc_headers += [
+            "objc/components/capturer/RTCCameraVideoCapturer.h",
+            "objc/components/capturer/RTCFileVideoCapturer.h",
+            "objc/components/renderer/metal/RTCMTLVideoView.h",
+            "objc/components/renderer/opengl/RTCEAGLVideoView.h",
+            "objc/components/renderer/opengl/RTCVideoViewShading.h",
+            "objc/helpers/RTCCameraPreviewView.h",
+          ]
+        }
+
+        if (!build_with_chromium) {
+          common_objc_headers += [
+            "objc/api/logging/RTCCallbackLogger.h",
+            "objc/api/peerconnection/RTCFileLogger.h",
+          ]
+        }
+''',
+    1,
+)
+replace(
+    "src/sdk/BUILD.gn",
+    '''        if (!build_with_chromium) {
+          deps += [
+            ":callback_logger_objc",
+            ":file_logger_objc",
+          ]
+        }
+''',
+    '''        if (target_platform != "xros") {
+          deps += [
+            ":metal_objc",
+            ":videocapture_objc",
+          ]
+        }
+
+        if (!build_with_chromium) {
+          deps += [
+            ":callback_logger_objc",
+            ":file_logger_objc",
+          ]
+        }
+''',
+    1,
+)
+replace(
+    "src/sdk/objc/components/audio/RTCAudioSessionConfiguration.m",
+    '''#if defined(__IPHONE_26_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_26_0
+    _categoryOptions = AVAudioSessionCategoryOptionAllowBluetoothHFP;
+#else
+    // Use the deprecated option on older SDKs.
+    _categoryOptions = AVAudioSessionCategoryOptionAllowBluetooth;
+#endif
+''',
+    '''#if defined(__VISION_OS_VERSION_MAX_ALLOWED) || \
+    (defined(__IPHONE_26_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_26_0)
+    _categoryOptions = AVAudioSessionCategoryOptionAllowBluetoothHFP;
+#else
+    // Use the deprecated option on older SDKs.
+    _categoryOptions = AVAudioSessionCategoryOptionAllowBluetooth;
+#endif
+''',
+)
+for source_file in (
+    "src/sdk/objc/components/video_codec/RTCVideoDecoderH264.mm",
+    "src/sdk/objc/components/video_codec/RTCVideoEncoderH264.mm",
+):
+    replace(
+        source_file,
+        '''#if defined(WEBRTC_IOS) && (TARGET_OS_MACCATALYST || TARGET_OS_SIMULATOR)
+''',
+        '''#if defined(WEBRTC_IOS) && \
+    (TARGET_OS_MACCATALYST || TARGET_OS_SIMULATOR || \
+     defined(__VISION_OS_VERSION_MAX_ALLOWED))
+''',
+    )
+replace(
+    "src/build/rust/known-target-triples.txt",
+    '''aarch64-apple-tvos
+aarch64-apple-tvos-sim
+''',
+    '''aarch64-apple-tvos
+aarch64-apple-tvos-sim
+aarch64-apple-visionos
+aarch64-apple-visionos-sim
+''',
+)
+replace(
+    "src/build/config/clang/BUILD.gn",
+    '''    } else if (target_platform == "tvos") {
+      if (target_environment == "simulator") {
+        libname = "tvossim"
+      } else if (target_environment == "device") {
+        libname = "tvos"
+      } else {
+        assert(false, "unsupported target_environment=$target_environment")
+      }
+    } else {
+''',
+    '''    } else if (target_platform == "tvos") {
+      if (target_environment == "simulator") {
+        libname = "tvossim"
+      } else if (target_environment == "device") {
+        libname = "tvos"
+      } else {
+        assert(false, "unsupported target_environment=$target_environment")
+      }
+    } else if (target_platform == "xros") {
+      # Chromium's prebuilt Clang toolchain does not currently ship xros
+      # compiler-rt archives. Do not add an explicit compiler_builtins
+      # library; Apple platforms can resolve compiler runtime support via the
+      # active Xcode toolchain during the final framework link.
+    } else {
+''',
+)
+replace(
+    "src/build/config/rust.gni",
+    '''    } else if (target_platform == "tvos") {
+      if (target_environment == "simulator") {
+        rust_abi_target = "aarch64-apple-tvos-sim"
+      } else if (target_environment == "device") {
+        rust_abi_target = "aarch64-apple-tvos"
+      } else {
+        assert(false, "unsupported target_environment=$target_environment")
+      }
+    } else {
+''',
+    '''    } else if (target_platform == "tvos") {
+      if (target_environment == "simulator") {
+        rust_abi_target = "aarch64-apple-tvos-sim"
+      } else if (target_environment == "device") {
+        rust_abi_target = "aarch64-apple-tvos"
+      } else {
+        assert(false, "unsupported target_environment=$target_environment")
+      }
+    } else if (target_platform == "xros") {
+      if (target_environment == "simulator") {
+        rust_abi_target = "aarch64-apple-visionos-sim"
+      } else if (target_environment == "device") {
+        rust_abi_target = "aarch64-apple-visionos"
+      } else {
+        assert(false, "unsupported target_environment=$target_environment")
+      }
+    } else {
+''',
+)
+PY
 }
 
 # Stage the dSYM for one XCFramework slice, named after its library identifier.
@@ -124,6 +535,7 @@ git fetch --all || exit 1
 git checkout "$BRANCH" || exit 1
 cd ..
 gclient sync --with_branch_heads --with_tags || exit 1
+patch_visionos_build_config || exit 1
 
 # Step 2.5 - Temp patch for macOS arm64 builds
 # bash "${ROOT_DIR}/scripts/patches/disable_apple_linker.sh" "${ROOT_DIR}/src/build/toolchain/apple/toolchain.gni" || exit 1
@@ -147,6 +559,11 @@ fi
 if [ "$MAC_CATALYST" = true ]; then
     build_catalyst "x64"
     build_catalyst "arm64"
+fi
+
+if [ "$VISIONOS" = true ]; then
+    build_visionOS "device"
+    build_visionOS "simulator"
 fi
 
 # Step 4 - Manually create XCFramework.
@@ -238,6 +655,43 @@ if [ "$MAC_CATALYST" = true ]; then
 
     fix_privacy_manifest "${XCFRAMEWORK_DIR}/${CATALYST_LIB_IDENTIFIER}/WebRTC.framework"
     lipo -create -output "${XCFRAMEWORK_DIR}/${CATALYST_LIB_IDENTIFIER}/WebRTC.framework/Versions/A/WebRTC" "${OUTPUT_DIR}/catalyst-x64/WebRTC.framework/WebRTC" "${OUTPUT_DIR}/catalyst-arm64/WebRTC.framework/WebRTC"
+    LIB_COUNT=$((LIB_COUNT+1))
+fi
+
+# Step 5.4 - visionOS libs to XCFramework
+if [ "$VISIONOS" = true ]; then
+
+    VISIONOS_LIB_IDENTIFIER="xros-arm64"
+    VISIONOS_SIM_LIB_IDENTIFIER="xros-arm64-simulator"
+
+    mkdir "${XCFRAMEWORK_DIR}/${VISIONOS_LIB_IDENTIFIER}"
+    mkdir "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}"
+    plist_add_library $LIB_COUNT "${VISIONOS_LIB_IDENTIFIER}" "xros"
+    plist_add_architecture $LIB_COUNT "arm64"
+    LIB_COUNT=$((LIB_COUNT+1))
+    plist_add_library $LIB_COUNT "${VISIONOS_SIM_LIB_IDENTIFIER}" "xros" "simulator"
+    plist_add_architecture $LIB_COUNT "arm64"
+
+    cp -RP \
+        "${OUTPUT_DIR}/visionos-arm64-device/WebRTC.framework" \
+        "${XCFRAMEWORK_DIR}/${VISIONOS_LIB_IDENTIFIER}"
+    cp -RP \
+        "${OUTPUT_DIR}/visionos-arm64-simulator/WebRTC.framework" \
+        "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}"
+    stage_dsym "${VISIONOS_LIB_IDENTIFIER}" "visionos-arm64-device"
+    stage_dsym "${VISIONOS_SIM_LIB_IDENTIFIER}" "visionos-arm64-simulator"
+
+    fix_visionos_framework_plist \
+        "${XCFRAMEWORK_DIR}/${VISIONOS_LIB_IDENTIFIER}/WebRTC.framework" \
+        "XROS" \
+        "xros"
+    fix_visionos_framework_plist \
+        "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}/WebRTC.framework" \
+        "XRSimulator" \
+        "xrsimulator"
+    xcrun codesign -s - \
+        "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}/WebRTC.framework/WebRTC"
+
     LIB_COUNT=$((LIB_COUNT+1))
 fi
 
