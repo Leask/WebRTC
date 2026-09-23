@@ -54,17 +54,18 @@ build_catalyst() {
 }
 
 build_visionOS() {
-    local environment=$1
+    local arch=$1
+    local environment=$2
     local gen_dir
 
     if [ "${environment}" = "simulator" ]; then
-        gen_dir="${OUTPUT_DIR}/visionos-arm64-simulator"
+        gen_dir="${OUTPUT_DIR}/visionos-${arch}-simulator"
     else
         gen_dir="${OUTPUT_DIR}/visionos-arm64-device"
     fi
 
     local gen_args="${COMMON_GN_ARGS}"
-    gen_args="${gen_args} target_cpu=\"arm64\" target_os=\"ios\""
+    gen_args="${gen_args} target_cpu=\"${arch}\" target_os=\"ios\""
     gen_args="${gen_args} target_environment=\"${environment}\""
     gen_args="${gen_args} target_platform=\"xros\" xros=true"
     gen_args="${gen_args} ios_deployment_target=\"2.0\""
@@ -428,6 +429,7 @@ aarch64-apple-tvos-sim
 aarch64-apple-tvos-sim
 aarch64-apple-visionos
 aarch64-apple-visionos-sim
+x86_64-apple-visionos-sim
 ''',
 )
 replace(
@@ -480,7 +482,11 @@ replace(
       }
     } else if (target_platform == "xros") {
       if (target_environment == "simulator") {
-        rust_abi_target = "aarch64-apple-visionos-sim"
+        if (target_cpu == "x64") {
+          rust_abi_target = "x86_64-apple-visionos-sim"
+        } else {
+          rust_abi_target = "aarch64-apple-visionos-sim"
+        }
       } else if (target_environment == "device") {
         rust_abi_target = "aarch64-apple-visionos"
       } else {
@@ -562,8 +568,9 @@ if [ "$MAC_CATALYST" = true ]; then
 fi
 
 if [ "$VISIONOS" = true ]; then
-    build_visionOS "device"
-    build_visionOS "simulator"
+    build_visionOS "arm64" "device"
+    build_visionOS "x64" "simulator"
+    build_visionOS "arm64" "simulator"
 fi
 
 # Step 4 - Manually create XCFramework.
@@ -662,7 +669,7 @@ fi
 if [ "$VISIONOS" = true ]; then
 
     VISIONOS_LIB_IDENTIFIER="xros-arm64"
-    VISIONOS_SIM_LIB_IDENTIFIER="xros-arm64-simulator"
+    VISIONOS_SIM_LIB_IDENTIFIER="xros-x86_64_arm64-simulator"
 
     mkdir "${XCFRAMEWORK_DIR}/${VISIONOS_LIB_IDENTIFIER}"
     mkdir "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}"
@@ -671,15 +678,19 @@ if [ "$VISIONOS" = true ]; then
     LIB_COUNT=$((LIB_COUNT+1))
     plist_add_library $LIB_COUNT "${VISIONOS_SIM_LIB_IDENTIFIER}" "xros" "simulator"
     plist_add_architecture $LIB_COUNT "arm64"
+    plist_add_architecture $LIB_COUNT "x86_64"
 
     cp -RP \
         "${OUTPUT_DIR}/visionos-arm64-device/WebRTC.framework" \
         "${XCFRAMEWORK_DIR}/${VISIONOS_LIB_IDENTIFIER}"
     cp -RP \
-        "${OUTPUT_DIR}/visionos-arm64-simulator/WebRTC.framework" \
+        "${OUTPUT_DIR}/visionos-x64-simulator/WebRTC.framework" \
         "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}"
     stage_dsym "${VISIONOS_LIB_IDENTIFIER}" "visionos-arm64-device"
-    stage_dsym "${VISIONOS_SIM_LIB_IDENTIFIER}" "visionos-arm64-simulator"
+    stage_dsym \
+        "${VISIONOS_SIM_LIB_IDENTIFIER}" \
+        "visionos-x64-simulator" \
+        "visionos-arm64-simulator"
 
     fix_visionos_framework_plist \
         "${XCFRAMEWORK_DIR}/${VISIONOS_LIB_IDENTIFIER}/WebRTC.framework" \
@@ -689,6 +700,10 @@ if [ "$VISIONOS" = true ]; then
         "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}/WebRTC.framework" \
         "XRSimulator" \
         "xrsimulator"
+    lipo -create -output \
+        "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}/WebRTC.framework/WebRTC" \
+        "${OUTPUT_DIR}/visionos-x64-simulator/WebRTC.framework/WebRTC" \
+        "${OUTPUT_DIR}/visionos-arm64-simulator/WebRTC.framework/WebRTC"
     xcrun codesign -s - \
         "${XCFRAMEWORK_DIR}/${VISIONOS_SIM_LIB_IDENTIFIER}/WebRTC.framework/WebRTC"
 
