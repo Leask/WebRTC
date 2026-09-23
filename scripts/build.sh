@@ -421,6 +421,29 @@ for source_file in (
 ''',
     )
 replace(
+    "src/third_party/libvpx/BUILD.gn",
+    '''if (current_cpu == "x86" || (current_cpu == "x64" && !is_msan)) {
+''',
+    '''if ((current_cpu == "x86" || (current_cpu == "x64" && !is_msan)) &&
+    target_platform != "xros") {
+''',
+)
+replace(
+    "src/third_party/libaom/BUILD.gn",
+    '''if (current_cpu == "x86" || (current_cpu == "x64" && !is_msan)) {
+''',
+    '''if ((current_cpu == "x86" || (current_cpu == "x64" && !is_msan)) &&
+    target_platform != "xros") {
+''',
+)
+replace(
+    "src/third_party/dav1d/BUILD.gn",
+    '''enable_nasm = (current_cpu == "x86" || current_cpu == "x64") && !is_msan
+''',
+    '''enable_nasm = (current_cpu == "x86" || current_cpu == "x64") && !is_msan && target_platform != "xros"
+''',
+)
+replace(
     "src/build/rust/known-target-triples.txt",
     '''aarch64-apple-tvos
 aarch64-apple-tvos-sim
