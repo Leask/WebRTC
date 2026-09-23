@@ -495,6 +495,35 @@ replace(
     } else {
 ''',
 )
+replace(
+    "src/build/config/rust.gni",
+    '''    } else if (target_platform == "tvos") {
+      if (target_environment == "simulator") {
+        rust_abi_target = "x86_64-apple-tvos"
+      } else {
+        assert(false, "unsupported target_environment=$target_environment")
+      }
+    } else {
+      assert(false, "unsupported target_platform=$target_platform")
+    }
+''',
+    '''    } else if (target_platform == "tvos") {
+      if (target_environment == "simulator") {
+        rust_abi_target = "x86_64-apple-tvos"
+      } else {
+        assert(false, "unsupported target_environment=$target_environment")
+      }
+    } else if (target_platform == "xros") {
+      if (target_environment == "simulator") {
+        rust_abi_target = "x86_64-apple-visionos-sim"
+      } else {
+        assert(false, "unsupported target_environment=$target_environment")
+      }
+    } else {
+      assert(false, "unsupported target_platform=$target_platform")
+    }
+''',
+)
 PY
 }
 
