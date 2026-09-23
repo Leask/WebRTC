@@ -71,6 +71,11 @@ build_visionOS() {
     gen_args="${gen_args} ios_deployment_target=\"2.0\""
     gen_args="${gen_args} ios_enable_code_signing=false"
     gen_args="${gen_args} rtc_ios_use_opengl_rendering=false"
+    gen_args="${gen_args} rtc_build_libvpx=false"
+    gen_args="${gen_args} rtc_libvpx_build_vp9=false"
+    gen_args="${gen_args} enable_libaom=false"
+    gen_args="${gen_args} rtc_include_dav1d_in_internal_decoder_factory=false"
+    gen_args="${gen_args} rtc_use_h264=false rtc_use_h265=false"
     gen_args="${gen_args} use_custom_libcxx=false"
     gen_args="${gen_args} clang_use_chrome_plugins=false use_lld=false"
     gn gen "${gen_dir}" --args="${gen_args}"
@@ -332,6 +337,32 @@ replace(
           ":native_video",
           ":peerconnectionfactory_base_objc",
           ":videocodec_objc",
+''',
+    1,
+)
+replace(
+    "src/sdk/BUILD.gn",
+    '''        deps = [
+          ":audio_objc",
+          ":base_objc",
+          ":default_codec_factory_objc",
+          ":native_api",
+          ":native_video",
+          ":peerconnectionfactory_base_objc",
+          ":videocodec_objc",
+        ]
+''',
+    '''        deps = [
+          ":audio_objc",
+          ":base_objc",
+          ":native_api",
+          ":native_video",
+          ":peerconnectionfactory_base_objc",
+          ":videocodec_objc",
+        ]
+        if (target_platform != "xros") {
+          deps += [ ":default_codec_factory_objc" ]
+        }
 ''',
     1,
 )
