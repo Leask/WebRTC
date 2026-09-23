@@ -350,6 +350,7 @@ replace(
           ":native_video",
           ":peerconnectionfactory_base_objc",
           ":videocodec_objc",
+          ":videotoolbox_objc",
         ]
 ''',
     '''        deps = [
@@ -361,7 +362,10 @@ replace(
           ":videocodec_objc",
         ]
         if (target_platform != "xros") {
-          deps += [ ":default_codec_factory_objc" ]
+          deps += [
+            ":default_codec_factory_objc",
+            ":videotoolbox_objc",
+          ]
         }
 ''',
     1,
